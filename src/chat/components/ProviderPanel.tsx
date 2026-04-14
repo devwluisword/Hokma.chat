@@ -1,36 +1,77 @@
-import { useState } from "react";
-import { PROVIDERS } from "../config";
+import { useState, useEffect } from "react";
+import { PROVIDERS, DEFAULT_HOKCLAW_URL } from "../config";
 
 interface Props {
   providerId: string;
   modelId: string;
   keys: Record<string, string>;
+  serverUrls: Record<string, string>;
   onClose: () => void;
-  onChange: (cfg: { providerId: string; modelId: string; keys: Record<string, string> }) => void;
+  onChange: (cfg: { providerId: string; modelId: string; keys: Record<string, string>; serverUrls: Record<string, string> }) => void;
 }
 
-type StatusKey = "testing" | "ok" | "err" | "nokey";
+type StatusKey = "testing" | "ok" | "err" | "nokey" | "discovering";
 
 const STATUS_MAP: Record<StatusKey, { bg: string; color: string; text: string }> = {
-  testing: { bg: "#FFF9E6", color: "#D97706", text: "Testando conexao..." },
-  ok:      { bg: "#F0FDF4", color: "#16A34A", text: "Conexao OK" },
-  err:     { bg: "#FEF2F2", color: "#DC2626", text: "Falha — verifique chave ou modelo" },
-  nokey:   { bg: "#FEF2F2", color: "#DC2626", text: "Insira a chave API primeiro" },
+  testing:     { bg: "#FFF9E6", color: "#D97706",  text: "Testando conexao..." },
+  discovering: { bg: "#EFF6FF", color: "#0F62FE",  text: "Descobrindo modelos e skills..." },
+  ok:          { bg: "#F0FDF4", color: "#16A34A",  text: "Conexao OK" },
+  err:         { bg: "#FEF2F2", color: "#DC2626",  text: "Falha — verifique URL ou modelo" },
+  nokey:       { bg: "#FEF2F2", color: "#DC2626",  text: "Insira a chave API primeiro" },
 };
 
-export function ProviderPanel({ providerId, modelId, keys, onClose, onChange }: Props) {
+export function ProviderPanel({ providerId, modelId, keys, serverUrls, onClose, onChange }: Props) {
   const [localKeys, setLocalKeys] = useState<Record<string, string>>({ ...keys });
+  const [localServerUrls, setLocalServerUrls] = useState<Record<string, string>>({ ...serverUrls });
   const [localModel, setLocalModel] = useState(modelId);
   const [localProvider, setLocalProvider] = useState(providerId);
   const [customModel, setCustomModel] = useState("");
   const [status, setStatus] = useState<StatusKey | null>(null);
+  const [discoveredModels, setDiscoveredModels] = useState<{ id: string; label: string }[]>([]);
 
   const prov = PROVIDERS.find(p => p.id === localProvider)!;
+  const hokClawUrl = localServerUrls["hokclaw"] || DEFAULT_HOKCLAW_URL;
+
+  const getApiUrl = () => {
+    if (localProvider === "hokclaw") {
+      return `${hokClawUrl.replace(/\/$/, "")}/v1/chat/completions`;
+    }
+    return prov.apiUrl;
+  };
+
+  const fetchModels = async (baseUrl: string) => {
+    try {
+      const res = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/models`, {
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!res.ok) return [];
+      const data = await res.json();
+      return (data.data || data.models || []).map(
+        (m: { id?: string; name?: string }) => ({
+          id: m.id || m.name || "",
+          label: m.id || m.name || "",
+        })
+      );
+    } catch {
+      return [];
+    }
+  };
+
+  useEffect(() => {
+    if (localProvider === "hokclaw") {
+      fetchModels(hokClawUrl).then(list => {
+        if (list.length > 0) setDiscoveredModels(list);
+      });
+    }
+  }, [localProvider, hokClawUrl]);
 
   const test = async () => {
     setStatus("testing");
     const key = prov.noKey ? "local" : (localKeys[localProvider] || "");
     if (!key && !prov.noKey) { setStatus("nokey"); return; }
+
+    const apiUrl = getApiUrl();
+
     try {
       const headers: Record<string, string> = { "Content-Type": "application/json" };
       if (!prov.noKey) headers["Authorization"] = `Bearer ${key}`;
@@ -38,9 +79,10 @@ export function ProviderPanel({ providerId, modelId, keys, onClose, onChange }: 
         headers["HTTP-Referer"] = "hokma-ai";
         headers["X-Title"] = "Hokma AI";
       }
-      const res = await fetch(prov.apiUrl, {
+      const res = await fetch(apiUrl, {
         method: "POST",
         headers,
+        signal: AbortSignal.timeout(8000),
         body: JSON.stringify({
           model: localModel === "custom" ? customModel : localModel,
           messages: [{ role: "user", content: "OK" }],
@@ -48,7 +90,17 @@ export function ProviderPanel({ providerId, modelId, keys, onClose, onChange }: 
         }),
       });
       const d = await res.json();
-      setStatus(d.choices?.[0]?.message?.content ? "ok" : "err");
+      if (d.choices?.[0]?.message?.content) {
+        setStatus("ok");
+        if (localProvider === "hokclaw") {
+          setStatus("discovering");
+          const models = await fetchModels(hokClawUrl);
+          if (models.length > 0) setDiscoveredModels(models);
+          setStatus("ok");
+        }
+      } else {
+        setStatus("err");
+      }
     } catch {
       setStatus("err");
     }
@@ -56,9 +108,20 @@ export function ProviderPanel({ providerId, modelId, keys, onClose, onChange }: 
 
   const apply = () => {
     const finalModel = localModel === "custom" ? customModel : localModel;
-    onChange({ providerId: localProvider, modelId: finalModel, keys: localKeys });
+    const updatedServerUrls = { ...localServerUrls };
+    if (localProvider === "hokclaw") {
+      updatedServerUrls["hokclaw"] = hokClawUrl;
+    }
+    onChange({ providerId: localProvider, modelId: finalModel, keys: localKeys, serverUrls: updatedServerUrls });
     onClose();
   };
+
+  const allModels = localProvider === "hokclaw" && discoveredModels.length > 0
+    ? [
+        ...discoveredModels,
+        ...prov.models.filter(m => m.id === "custom" && !discoveredModels.find(d => d.id === "custom")),
+      ]
+    : prov.models;
 
   return (
     <div
@@ -91,7 +154,7 @@ export function ProviderPanel({ providerId, modelId, keys, onClose, onChange }: 
         <div style={{ display: "flex", gap: 6, marginBottom: 16, overflowX: "auto", paddingBottom: 2 }}>
           {PROVIDERS.map(p => (
             <button key={p.id}
-              onClick={() => { setLocalProvider(p.id); setLocalModel(p.models[0].id); setStatus(null); }}
+              onClick={() => { setLocalProvider(p.id); setLocalModel(p.models[0].id); setStatus(null); setDiscoveredModels([]); }}
               style={{
                 padding: "7px 14px", borderRadius: 9999,
                 border: `1.5px solid ${localProvider === p.id ? p.color : "#E5E7EB"}`,
@@ -115,16 +178,42 @@ export function ProviderPanel({ providerId, modelId, keys, onClose, onChange }: 
         </div>
 
         {prov.id === "hokclaw" && (
-          <div style={{
-            fontSize: 13, color: "#374151", marginBottom: 14,
-            background: "#EFF6FF", padding: "10px 14px",
-            borderRadius: 10, lineHeight: 1.6,
-            border: "1px solid #BFDBFE",
-          }}>
-            <strong style={{ color: "#0F62FE" }}>HokClaw</strong> — Orquestrador local rodando no seu celular.<br />
-            Conectado em: <code style={{ fontSize: 12, background: "#DBEAFE", padding: "1px 6px", borderRadius: 4 }}>
-              {prov.apiUrl}
-            </code>
+          <div style={{ marginBottom: 14 }}>
+            <div style={{
+              fontSize: 13, color: "#374151", marginBottom: 10,
+              background: "#EFF6FF", padding: "10px 14px",
+              borderRadius: 10, lineHeight: 1.6,
+              border: "1px solid #BFDBFE",
+            }}>
+              <strong style={{ color: "#0F62FE" }}>HokClaw v2</strong> — Orquestrador IA local em Go.<br />
+              Suporta <strong>skills</strong>, descoberta de modelos e execucao privada.
+            </div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#9CA3AF", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 6 }}>
+              URL do Servidor
+            </div>
+            <input
+              type="text"
+              value={localServerUrls["hokclaw"] || DEFAULT_HOKCLAW_URL}
+              onChange={e => setLocalServerUrls(prev => ({ ...prev, hokclaw: e.target.value }))}
+              placeholder={DEFAULT_HOKCLAW_URL}
+              style={{
+                width: "100%", padding: "11px 14px",
+                border: "1.5px solid #BFDBFE", borderRadius: 10,
+                fontFamily: "monospace", fontSize: 13, outline: "none",
+                background: "#F0F9FF", color: "#111",
+              }}
+            />
+            {discoveredModels.length > 0 && (
+              <div style={{
+                marginTop: 8, fontSize: 11.5, color: "#16A34A",
+                display: "flex", alignItems: "center", gap: 5,
+              }}>
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="20 6 9 17 4 12" />
+                </svg>
+                {discoveredModels.length} modelo(s) descoberto(s) do servidor
+              </div>
+            )}
           </div>
         )}
 
@@ -177,7 +266,7 @@ export function ProviderPanel({ providerId, modelId, keys, onClose, onChange }: 
               background: "#FAFAFA", color: "#111",
               fontFamily: "inherit", cursor: "pointer",
             }}>
-            {prov.models.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
+            {allModels.map(m => <option key={m.id} value={m.id}>{m.label}</option>)}
           </select>
           {localModel === "custom" && (
             <input
@@ -198,7 +287,13 @@ export function ProviderPanel({ providerId, modelId, keys, onClose, onChange }: 
           <div style={{
             padding: "10px 14px", borderRadius: 9, marginBottom: 14, fontSize: 13,
             background: STATUS_MAP[status].bg, color: STATUS_MAP[status].color, fontWeight: 700,
+            display: "flex", alignItems: "center", gap: 8,
           }}>
+            {status === "testing" || status === "discovering" ? (
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" style={{ animation: "hk-spin 1s linear infinite", flexShrink: 0 }}>
+                <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+              </svg>
+            ) : null}
             {STATUS_MAP[status].text}
           </div>
         )}

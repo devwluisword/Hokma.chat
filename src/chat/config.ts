@@ -1,5 +1,7 @@
 import type { Provider, Agent } from "./types";
 
+export const DEFAULT_HOKCLAW_URL = "http://10.118.44.210:18800";
+
 export const PROVIDERS: Provider[] = [
   {
     id: "hokclaw",
@@ -7,8 +9,10 @@ export const PROVIDERS: Provider[] = [
     icon: "H",
     color: "#0F62FE",
     freeNote: "Orquestrador Local · Go · Privado",
-    apiUrl: "http://10.118.44.210:18800/v1/chat/completions",
+    apiUrl: `${DEFAULT_HOKCLAW_URL}/v1/chat/completions`,
     noKey: true,
+    supportsSkills: true,
+    supportsModelDiscovery: true,
     models: [
       { id: "hokma-coder-v1", label: "Hokmá Coder v1" },
       { id: "hokma-general-v2", label: "Hokmá Geral v2" },
@@ -121,7 +125,7 @@ export const AGENTS: Agent[] = [
 
 export const STORE_KEY = "hokma_v2_config";
 
-export const loadConfig = (): Partial<{ providerId: string; modelId: string; apiKeys: Record<string, string> }> => {
+export const loadConfig = (): Partial<{ providerId: string; modelId: string; apiKeys: Record<string, string>; serverUrls: Record<string, string> }> => {
   try {
     const raw = localStorage.getItem(STORE_KEY);
     return raw ? JSON.parse(raw) : {};

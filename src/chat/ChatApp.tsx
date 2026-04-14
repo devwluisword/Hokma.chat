@@ -1,8 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { PROVIDERS, AGENTS, loadConfig, saveConfig } from "./config";
+import { PROVIDERS, AGENTS, loadConfig, saveConfig, DEFAULT_HOKCLAW_URL } from "./config";
 import { ProviderPanel } from "./components/ProviderPanel";
 import { MessageContent } from "./components/MessageContent";
-import type { Message } from "./types";
+import { SkillsPanel } from "./components/SkillsPanel";
+import { useHokClaw } from "./hooks/useHokClaw";
+import type { Message, Skill } from "./types";
 
 function ThinkingDots() {
   return (
@@ -24,6 +26,7 @@ export default function ChatApp() {
   const [providerId, setProviderId] = useState(cfg.providerId || "hokclaw");
   const [modelId, setModelId] = useState(cfg.modelId || "hokma-coder-v1");
   const [apiKeys, setApiKeys] = useState<Record<string, string>>(cfg.apiKeys || {});
+  const [serverUrls, setServerUrls] = useState<Record<string, string>>(cfg.serverUrls || {});
   const [agentId, setAgentId] = useState("programmer");
   const [messages, setMessages] = useState<Message[]>([]);
   const [input, setInput] = useState("");
@@ -31,6 +34,8 @@ export default function ChatApp() {
   const [showPanel, setShowPanel] = useState(false);
   const [isListening, setIsListening] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<"unknown" | "ok" | "err">("unknown");
+  const [activeSkillId, setActiveSkillId] = useState<string | null>(null);
+  const [hokClawSkills, setHokClawSkills] = useState<Skill[]>([]);
 
   const chatRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -38,10 +43,23 @@ export default function ChatApp() {
 
   const provider = PROVIDERS.find(p => p.id === providerId)!;
   const agent = AGENTS.find(a => a.id === agentId)!;
+  const hokClawBaseUrl = (serverUrls["hokclaw"] || DEFAULT_HOKCLAW_URL).replace(/\/$/, "");
+
+  const { skills, probeAndLoad } = useHokClaw(hokClawBaseUrl);
 
   useEffect(() => {
-    saveConfig({ providerId, modelId, apiKeys });
-  }, [providerId, modelId, apiKeys]);
+    if (providerId === "hokclaw") {
+      probeAndLoad();
+    }
+  }, [providerId, hokClawBaseUrl, probeAndLoad]);
+
+  useEffect(() => {
+    if (skills.length > 0) setHokClawSkills(skills);
+  }, [skills]);
+
+  useEffect(() => {
+    saveConfig({ providerId, modelId, apiKeys, serverUrls });
+  }, [providerId, modelId, apiKeys, serverUrls]);
 
   useEffect(() => {
     if (chatRef.current) {
@@ -55,6 +73,13 @@ export default function ChatApp() {
     el.style.height = "auto";
     el.style.height = Math.min(el.scrollHeight, 128) + "px";
   };
+
+  const getApiUrl = useCallback(() => {
+    if (providerId === "hokclaw") {
+      return `${hokClawBaseUrl}/v1/chat/completions`;
+    }
+    return provider.apiUrl;
+  }, [providerId, hokClawBaseUrl, provider.apiUrl]);
 
   const sendMessage = useCallback(async (overrideText?: string) => {
     const txt = (overrideText ?? input).trim();
@@ -71,7 +96,7 @@ export default function ChatApp() {
     setLoading(true);
 
     const aiId = Date.now() + 1;
-    setMessages(prev => [...prev, { id: aiId, role: "ai", content: "", agentId, streaming: true }]);
+    setMessages(prev => [...prev, { id: aiId, role: "ai", content: "", agentId, streaming: true, skillUsed: activeSkillId || undefined }]);
 
     abortRef.current = new AbortController();
 
@@ -86,22 +111,36 @@ export default function ChatApp() {
       .filter(m => !m.streaming)
       .map(m => ({ role: m.role === "ai" ? "assistant" : "user", content: m.content }));
 
+    let systemPrompt = agent.prompt;
+    if (activeSkillId && providerId === "hokclaw") {
+      const skill = hokClawSkills.find(s => s.id === activeSkillId);
+      if (skill) {
+        systemPrompt = `${agent.prompt}\n\nSkill ativa: ${skill.name} — ${skill.description}`;
+      }
+    }
+
+    const requestBody: Record<string, unknown> = {
+      model: modelId,
+      messages: [
+        { role: "system", content: systemPrompt },
+        ...historyMessages,
+        { role: "user", content: txt },
+      ],
+      stream: true,
+      max_tokens: 2048,
+      temperature: 0.7,
+    };
+
+    if (activeSkillId && providerId === "hokclaw") {
+      requestBody.skill = activeSkillId;
+    }
+
     try {
-      const res = await fetch(provider.apiUrl, {
+      const res = await fetch(getApiUrl(), {
         method: "POST",
         headers,
         signal: abortRef.current.signal,
-        body: JSON.stringify({
-          model: modelId,
-          messages: [
-            { role: "system", content: agent.prompt },
-            ...historyMessages,
-            { role: "user", content: txt },
-          ],
-          stream: true,
-          max_tokens: 2048,
-          temperature: 0.7,
-        }),
+        body: JSON.stringify(requestBody),
       });
 
       if (!res.ok) {
@@ -168,7 +207,7 @@ export default function ChatApp() {
           m.id === aiId
             ? {
                 ...m,
-                content: `Erro de conexao com ${provider.name} (${provider.apiUrl}).\n\n${errMsg}\n\nVerifique se o servidor esta acessivel.`,
+                content: `Erro de conexao com ${provider.name}.\n\n${errMsg}\n\nVerifique se o servidor esta acessivel em: ${getApiUrl()}`,
                 error: true,
               }
             : m
@@ -179,7 +218,7 @@ export default function ChatApp() {
       setMessages(prev => prev.map(m => m.id === aiId ? { ...m, streaming: false } : m));
       setTimeout(() => textareaRef.current?.focus(), 50);
     }
-  }, [input, loading, providerId, modelId, apiKeys, agent, agentId, provider, messages]);
+  }, [input, loading, providerId, modelId, apiKeys, agent, agentId, provider, messages, activeSkillId, hokClawSkills, getApiUrl]);
 
   const stopGeneration = () => {
     abortRef.current?.abort();
@@ -203,16 +242,18 @@ export default function ChatApp() {
     recognition.start();
   };
 
-  const applyConfig = (cfg: { providerId: string; modelId: string; keys: Record<string, string> }) => {
+  const applyConfig = (cfg: { providerId: string; modelId: string; keys: Record<string, string>; serverUrls: Record<string, string> }) => {
     setProviderId(cfg.providerId);
     setModelId(cfg.modelId);
     setApiKeys(prev => ({ ...prev, ...cfg.keys }));
+    setServerUrls(prev => ({ ...prev, ...cfg.serverUrls }));
     setConnectionStatus("unknown");
   };
 
   const isEmpty = messages.length === 0 && !loading;
   const modelLabel = provider.models.find(m => m.id === modelId)?.label || modelId;
   const hasKey = provider.noKey || !!apiKeys[providerId];
+  const showSkills = providerId === "hokclaw" && hokClawSkills.length > 0;
 
   return (
     <>
@@ -236,10 +277,15 @@ export default function ChatApp() {
           0%, 100% { opacity: 1; }
           50% { opacity: 0.4; }
         }
+        @keyframes hk-spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
         .hk-msg { animation: hk-fadeUp 0.2s ease; }
         ::-webkit-scrollbar { width: 3px; height: 3px; }
         ::-webkit-scrollbar-thumb { background: #D1D5DB; border-radius: 10px; }
         #hk-agent-bar::-webkit-scrollbar { display: none; }
+        #hk-skills-bar::-webkit-scrollbar { display: none; }
         .hk-agent-btn { transition: all 0.15s ease; }
         .hk-agent-btn:active { transform: scale(0.96); }
         .hk-tip-btn:hover { background: #F0F9FF !important; border-color: #BFDBFE !important; }
@@ -255,7 +301,7 @@ export default function ChatApp() {
         position: "fixed", top: 0, left: 0,
       }}>
 
-        {/* ── HEADER ── */}
+        {/* HEADER */}
         <div style={{
           background: "#fff",
           borderBottom: "1px solid #E5E7EB",
@@ -293,7 +339,7 @@ export default function ChatApp() {
             fontSize: 12.5, fontWeight: 700,
             border: `1.5px solid ${provider.color}30`,
             cursor: "pointer", fontFamily: "inherit",
-            maxWidth: 180, overflow: "hidden",
+            maxWidth: 200, overflow: "hidden",
           }}>
             <div style={{
               width: 20, height: 20, borderRadius: 6,
@@ -306,6 +352,15 @@ export default function ChatApp() {
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {provider.name}
             </span>
+            {activeSkillId && providerId === "hokclaw" && (
+              <span style={{
+                background: "#0F62FE", color: "#fff",
+                fontSize: 9, fontWeight: 800, padding: "1px 5px",
+                borderRadius: 4, letterSpacing: "0.3px", flexShrink: 0,
+              }}>
+                SKILL
+              </span>
+            )}
             <div style={{
               width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
               background: connectionStatus === "ok" ? "#16A34A" : connectionStatus === "err" ? "#DC2626" : hasKey ? "#D97706" : "#E5E7EB",
@@ -314,10 +369,10 @@ export default function ChatApp() {
           </button>
         </div>
 
-        {/* ── AGENT BAR ── */}
+        {/* AGENT BAR */}
         <div id="hk-agent-bar" style={{
           background: "#fff",
-          borderBottom: "1px solid #E5E7EB",
+          borderBottom: showSkills ? "none" : "1px solid #E5E7EB",
           padding: "8px 16px",
           display: "flex", alignItems: "center", gap: 6,
           overflowX: "auto", flexShrink: 0,
@@ -352,7 +407,23 @@ export default function ChatApp() {
           ))}
         </div>
 
-        {/* ── CHAT AREA ── */}
+        {/* SKILLS BAR */}
+        {showSkills && (
+          <div id="hk-skills-bar" style={{
+            background: "#fff",
+            borderBottom: "1px solid #E5E7EB",
+            padding: "6px 16px 8px",
+            flexShrink: 0,
+          }}>
+            <SkillsPanel
+              skills={hokClawSkills}
+              activeSkillId={activeSkillId}
+              onSelectSkill={setActiveSkillId}
+            />
+          </div>
+        )}
+
+        {/* CHAT AREA */}
         <div ref={chatRef} style={{
           flex: 1, overflowY: "auto",
           padding: "20px 16px",
@@ -395,6 +466,15 @@ export default function ChatApp() {
                     {provider.name}
                   </span>
                 </p>
+                {activeSkillId && (
+                  <div style={{
+                    marginTop: 8, fontSize: 12, color: "#0F62FE",
+                    fontWeight: 600, background: "#EFF6FF",
+                    padding: "4px 12px", borderRadius: 20, display: "inline-block",
+                  }}>
+                    Skill ativa: {hokClawSkills.find(s => s.id === activeSkillId)?.name}
+                  </div>
+                )}
               </div>
 
               {!hasKey && (
@@ -451,6 +531,15 @@ export default function ChatApp() {
                 }}>
                   <span>{AGENTS.find(a => a.id === msg.agentId)?.icon}</span>
                   <span>{AGENTS.find(a => a.id === msg.agentId)?.name}</span>
+                  {msg.skillUsed && (
+                    <span style={{
+                      background: "#EFF6FF", color: "#0F62FE",
+                      fontSize: 9, fontWeight: 800, padding: "1px 5px",
+                      borderRadius: 4, letterSpacing: "0.3px",
+                    }}>
+                      {hokClawSkills.find(s => s.id === msg.skillUsed)?.name || msg.skillUsed}
+                    </span>
+                  )}
                   {msg.streaming && (
                     <span style={{
                       width: 5, height: 5, borderRadius: "50%",
@@ -487,7 +576,7 @@ export default function ChatApp() {
           ))}
         </div>
 
-        {/* ── INPUT AREA ── */}
+        {/* INPUT AREA */}
         <div style={{
           background: "#fff",
           borderTop: "1px solid #E5E7EB",
@@ -518,7 +607,7 @@ export default function ChatApp() {
           <div style={{
             flex: 1,
             background: "#F9FAFB",
-            border: "1.5px solid #E5E7EB",
+            border: `1.5px solid ${activeSkillId ? "#BFDBFE" : "#E5E7EB"}`,
             borderRadius: 14,
             display: "flex", alignItems: "center",
             transition: "border-color 0.15s",
@@ -533,7 +622,13 @@ export default function ChatApp() {
                   sendMessage();
                 }
               }}
-              placeholder={isListening ? "Ouvindo..." : "Mensagem..."}
+              placeholder={
+                isListening
+                  ? "Ouvindo..."
+                  : activeSkillId
+                  ? `Skill: ${hokClawSkills.find(s => s.id === activeSkillId)?.name || activeSkillId}...`
+                  : "Mensagem..."
+              }
               rows={1}
               autoCapitalize="none"
               autoCorrect="off"
@@ -570,7 +665,7 @@ export default function ChatApp() {
               disabled={!input.trim()}
               style={{
                 width: 44, height: 44, borderRadius: "50%", border: "none", flexShrink: 0,
-                background: input.trim() ? "#0F62FE" : "#E5E7EB",
+                background: input.trim() ? (activeSkillId ? "#0F62FE" : "#111827") : "#E5E7EB",
                 display: "flex", alignItems: "center", justifyContent: "center",
                 cursor: input.trim() ? "pointer" : "not-allowed",
                 transition: "all 0.15s",
@@ -585,7 +680,7 @@ export default function ChatApp() {
           )}
         </div>
 
-        {/* ── STATUS BAR ── */}
+        {/* STATUS BAR */}
         <div style={{
           background: "#FAFAFA",
           borderTop: "1px solid #E5E7EB",
@@ -607,6 +702,11 @@ export default function ChatApp() {
                 : hasKey ? "#D97706" : "#D1D5DB",
             }} />
             {provider.name} · {modelLabel.replace(" (Free)", "").replace(" Rapido", "")}
+            {activeSkillId && (
+              <span style={{ color: "#0F62FE" }}>
+                · {hokClawSkills.find(s => s.id === activeSkillId)?.name || activeSkillId}
+              </span>
+            )}
           </div>
           <button
             onClick={() => setMessages([])}
@@ -627,6 +727,7 @@ export default function ChatApp() {
           providerId={providerId}
           modelId={modelId}
           keys={apiKeys}
+          serverUrls={serverUrls}
           onClose={() => setShowPanel(false)}
           onChange={applyConfig}
         />
