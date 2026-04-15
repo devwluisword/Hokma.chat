@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import { PROVIDERS, DEFAULT_HOKCLAW_URL } from "../config";
+import { PROVIDERS, DEFAULT_OPENCLAW_URL, DEFAULT_GEMINI_API_KEY } from "../config";
 
 interface Props {
   providerId: string;
@@ -14,14 +14,14 @@ type StatusKey = "testing" | "ok" | "err" | "nokey" | "discovering";
 
 const STATUS_MAP: Record<StatusKey, { bg: string; color: string; text: string }> = {
   testing:     { bg: "#FFF9E6", color: "#D97706",  text: "Testando conexao..." },
-  discovering: { bg: "#EFF6FF", color: "#0F62FE",  text: "Descobrindo modelos e skills..." },
+  discovering: { bg: "#F5F3FF", color: "#8B5CF6",  text: "Descobrindo modelos e skills..." },
   ok:          { bg: "#F0FDF4", color: "#16A34A",  text: "Conexao OK" },
   err:         { bg: "#FEF2F2", color: "#DC2626",  text: "Falha — verifique URL ou modelo" },
   nokey:       { bg: "#FEF2F2", color: "#DC2626",  text: "Insira a chave API primeiro" },
 };
 
 export function ProviderPanel({ providerId, modelId, keys, serverUrls, onClose, onChange }: Props) {
-  const [localKeys, setLocalKeys] = useState<Record<string, string>>({ ...keys });
+  const [localKeys, setLocalKeys] = useState<Record<string, string>>({ ...keys, gemini: DEFAULT_GEMINI_API_KEY });
   const [localServerUrls, setLocalServerUrls] = useState<Record<string, string>>({ ...serverUrls });
   const [localModel, setLocalModel] = useState(modelId);
   const [localProvider, setLocalProvider] = useState(providerId);
@@ -30,11 +30,11 @@ export function ProviderPanel({ providerId, modelId, keys, serverUrls, onClose, 
   const [discoveredModels, setDiscoveredModels] = useState<{ id: string; label: string }[]>([]);
 
   const prov = PROVIDERS.find(p => p.id === localProvider)!;
-  const hokClawUrl = localServerUrls["hokclaw"] || DEFAULT_HOKCLAW_URL;
+  const openClawUrl = localServerUrls["openclaw"] || DEFAULT_OPENCLAW_URL;
 
   const getApiUrl = () => {
-    if (localProvider === "hokclaw") {
-      return `${hokClawUrl.replace(/\/$/, "")}/v1/chat/completions`;
+    if (localProvider === "openclaw") {
+      return `${openClawUrl.replace(/\/$/, "")}/v1/chat/completions`;
     }
     return prov.apiUrl;
   };
@@ -58,12 +58,12 @@ export function ProviderPanel({ providerId, modelId, keys, serverUrls, onClose, 
   };
 
   useEffect(() => {
-    if (localProvider === "hokclaw") {
-      fetchModels(hokClawUrl).then(list => {
+    if (localProvider === "openclaw") {
+      fetchModels(openClawUrl).then(list => {
         if (list.length > 0) setDiscoveredModels(list);
       });
     }
-  }, [localProvider, hokClawUrl]);
+  }, [localProvider, openClawUrl]);
 
   const test = async () => {
     setStatus("testing");
@@ -92,9 +92,9 @@ export function ProviderPanel({ providerId, modelId, keys, serverUrls, onClose, 
       const d = await res.json();
       if (d.choices?.[0]?.message?.content) {
         setStatus("ok");
-        if (localProvider === "hokclaw") {
+        if (localProvider === "openclaw") {
           setStatus("discovering");
-          const models = await fetchModels(hokClawUrl);
+          const models = await fetchModels(openClawUrl);
           if (models.length > 0) setDiscoveredModels(models);
           setStatus("ok");
         }
@@ -109,14 +109,14 @@ export function ProviderPanel({ providerId, modelId, keys, serverUrls, onClose, 
   const apply = () => {
     const finalModel = localModel === "custom" ? customModel : localModel;
     const updatedServerUrls = { ...localServerUrls };
-    if (localProvider === "hokclaw") {
-      updatedServerUrls["hokclaw"] = hokClawUrl;
+    if (localProvider === "openclaw") {
+      updatedServerUrls["openclaw"] = openClawUrl;
     }
-    onChange({ providerId: localProvider, modelId: finalModel, keys: localKeys, serverUrls: updatedServerUrls });
+    onChange({ providerId: localProvider, modelId: finalModel, keys: { ...localKeys, gemini: DEFAULT_GEMINI_API_KEY }, serverUrls: updatedServerUrls });
     onClose();
   };
 
-  const allModels = localProvider === "hokclaw" && discoveredModels.length > 0
+  const allModels = localProvider === "openclaw" && discoveredModels.length > 0
     ? [
         ...discoveredModels,
         ...prov.models.filter(m => m.id === "custom" && !discoveredModels.find(d => d.id === "custom")),
@@ -177,30 +177,30 @@ export function ProviderPanel({ providerId, modelId, keys, serverUrls, onClose, 
           {prov.freeNote}
         </div>
 
-        {prov.id === "hokclaw" && (
+        {prov.id === "openclaw" && (
           <div style={{ marginBottom: 14 }}>
             <div style={{
               fontSize: 13, color: "#374151", marginBottom: 10,
-              background: "#EFF6FF", padding: "10px 14px",
+              background: "#F5F3FF", padding: "10px 14px",
               borderRadius: 10, lineHeight: 1.6,
-              border: "1px solid #BFDBFE",
+              border: "1px solid #DDD6FE",
             }}>
-              <strong style={{ color: "#0F62FE" }}>HokClaw v2</strong> — Orquestrador IA local em Go.<br />
-              Suporta <strong>skills</strong>, descoberta de modelos e execucao privada.
+              <strong style={{ color: "#8B5CF6" }}>OpenClaw</strong> — Orquestrador local com <strong>Gemini</strong> como cérebro.<br />
+              Suporta <strong>skills</strong>, descoberta de modelos e execução privada.
             </div>
             <div style={{ fontSize: 11, fontWeight: 700, color: "#9CA3AF", textTransform: "uppercase", letterSpacing: "0.5px", marginBottom: 6 }}>
               URL do Servidor
             </div>
             <input
               type="text"
-              value={localServerUrls["hokclaw"] || DEFAULT_HOKCLAW_URL}
-              onChange={e => setLocalServerUrls(prev => ({ ...prev, hokclaw: e.target.value }))}
-              placeholder={DEFAULT_HOKCLAW_URL}
+              value={localServerUrls["openclaw"] || DEFAULT_OPENCLAW_URL}
+              onChange={e => setLocalServerUrls(prev => ({ ...prev, openclaw: e.target.value }))}
+              placeholder={DEFAULT_OPENCLAW_URL}
               style={{
                 width: "100%", padding: "11px 14px",
-                border: "1.5px solid #BFDBFE", borderRadius: 10,
+                border: "1.5px solid #DDD6FE", borderRadius: 10,
                 fontFamily: "monospace", fontSize: 13, outline: "none",
-                background: "#F0F9FF", color: "#111",
+                background: "#F5F3FF", color: "#111",
               }}
             />
             {discoveredModels.length > 0 && (
