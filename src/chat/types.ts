@@ -18,6 +18,7 @@ export interface Provider {
   noKey?: boolean;
   supportsSkills?: boolean;
   supportsModelDiscovery?: boolean;
+  isOrchestrator?: boolean;
   models: { id: string; label: string }[];
 }
 

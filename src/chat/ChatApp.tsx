@@ -1,9 +1,10 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import { PROVIDERS, AGENTS, loadConfig, saveConfig, DEFAULT_HOKCLAW_URL } from "./config";
+import { PROVIDERS, AGENTS, loadConfig, saveConfig, DEFAULT_OPENCLAW_URL, DEFAULT_GEMINI_API_KEY } from "./config";
 import { ProviderPanel } from "./components/ProviderPanel";
 import { MessageContent } from "./components/MessageContent";
 import { SkillsPanel } from "./components/SkillsPanel";
-import { useHokClaw } from "./hooks/useHokClaw";
+import { useGemini } from "./hooks/useGemini";
+import { useOpenClaw } from "./hooks/useOpenClaw";
 import type { Message, Skill } from "./types";
 
 function ThinkingDots() {
@@ -12,7 +13,7 @@ function ThinkingDots() {
       {[0, 1, 2].map(i => (
         <div key={i} style={{
           width: 6, height: 6, borderRadius: "50%",
-          background: "#0F62FE",
+          background: "#8B5CF6",
           animation: "hk-bounce 1.2s infinite ease-in-out",
           animationDelay: `${i * 0.2}s`,
         }} />
@@ -23,9 +24,9 @@ function ThinkingDots() {
 
 export default function ChatApp() {
   const cfg = loadConfig();
-  const [providerId, setProviderId] = useState(cfg.providerId || "hokclaw");
-  const [modelId, setModelId] = useState(cfg.modelId || "hokma-coder-v1");
-  const [apiKeys, setApiKeys] = useState<Record<string, string>>(cfg.apiKeys || {});
+  const [providerId, setProviderId] = useState<string>(cfg.providerId || "openclaw");
+  const [modelId, setModelId] = useState<string>(cfg.modelId || "gemini-2.0-flash");
+  const [apiKeys, setApiKeys] = useState<Record<string, string>>(cfg.apiKeys || { gemini: DEFAULT_GEMINI_API_KEY });
   const [serverUrls, setServerUrls] = useState<Record<string, string>>(cfg.serverUrls || {});
   const [agentId, setAgentId] = useState("programmer");
   const [messages, setMessages] = useState<Message[]>([]);
@@ -35,7 +36,7 @@ export default function ChatApp() {
   const [isListening, setIsListening] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<"unknown" | "ok" | "err">("unknown");
   const [activeSkillId, setActiveSkillId] = useState<string | null>(null);
-  const [hokClawSkills, setHokClawSkills] = useState<Skill[]>([]);
+  const [openClawSkills, setOpenClawSkills] = useState<Skill[]>([]);
 
   const chatRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -43,19 +44,9 @@ export default function ChatApp() {
 
   const provider = PROVIDERS.find(p => p.id === providerId)!;
   const agent = AGENTS.find(a => a.id === agentId)!;
-  const hokClawBaseUrl = (serverUrls["hokclaw"] || DEFAULT_HOKCLAW_URL).replace(/\/$/, "");
 
-  const { skills, probeAndLoad } = useHokClaw(hokClawBaseUrl);
-
-  useEffect(() => {
-    if (providerId === "hokclaw") {
-      probeAndLoad();
-    }
-  }, [providerId, hokClawBaseUrl, probeAndLoad]);
-
-  useEffect(() => {
-    if (skills.length > 0) setHokClawSkills(skills);
-  }, [skills]);
+  const { sendMessage: sendGemini } = useGemini();
+  const { sendMessage: sendOpenClaw, checkHealth: checkOpenClawHealth } = useOpenClaw();
 
   useEffect(() => {
     saveConfig({ providerId, modelId, apiKeys, serverUrls });
@@ -74,19 +65,9 @@ export default function ChatApp() {
     el.style.height = Math.min(el.scrollHeight, 128) + "px";
   };
 
-  const getApiUrl = useCallback(() => {
-    if (providerId === "hokclaw") {
-      return `${hokClawBaseUrl}/v1/chat/completions`;
-    }
-    return provider.apiUrl;
-  }, [providerId, hokClawBaseUrl, provider.apiUrl]);
-
   const sendMessage = useCallback(async (overrideText?: string) => {
     const txt = (overrideText ?? input).trim();
     if (!txt || loading) return;
-
-    const needsKey = !provider.noKey && !apiKeys[providerId];
-    if (needsKey) { setShowPanel(true); return; }
 
     setInput("");
     if (textareaRef.current) textareaRef.current.style.height = "46px";
@@ -100,89 +81,60 @@ export default function ChatApp() {
 
     abortRef.current = new AbortController();
 
-    const headers: Record<string, string> = { "Content-Type": "application/json" };
-    if (!provider.noKey) headers["Authorization"] = `Bearer ${apiKeys[providerId] || ""}`;
-    if (providerId === "openrouter") {
-      headers["HTTP-Referer"] = "hokma-ai";
-      headers["X-Title"] = "Hokma AI";
-    }
-
     const historyMessages = messages
       .filter(m => !m.streaming)
       .map(m => ({ role: m.role === "ai" ? "assistant" : "user", content: m.content }));
 
     let systemPrompt = agent.prompt;
-    if (activeSkillId && providerId === "hokclaw") {
-      const skill = hokClawSkills.find(s => s.id === activeSkillId);
+    if (activeSkillId && providerId === "openclaw") {
+      const skill = openClawSkills.find(s => s.id === activeSkillId);
       if (skill) {
         systemPrompt = `${agent.prompt}\n\nSkill ativa: ${skill.name} — ${skill.description}`;
       }
     }
 
-    const requestBody: Record<string, unknown> = {
-      model: modelId,
-      messages: [
-        { role: "system", content: systemPrompt },
-        ...historyMessages,
-        { role: "user", content: txt },
-      ],
-      stream: true,
-      max_tokens: 2048,
-      temperature: 0.7,
-    };
-
-    if (activeSkillId && providerId === "hokclaw") {
-      requestBody.skill = activeSkillId;
-    }
+    const allMessages = [
+      { role: "system" as const, content: systemPrompt },
+      ...historyMessages,
+      { role: "user" as const, content: txt },
+    ];
 
     try {
-      const res = await fetch(getApiUrl(), {
-        method: "POST",
-        headers,
-        signal: abortRef.current.signal,
-        body: JSON.stringify(requestBody),
-      });
-
-      if (!res.ok) {
-        const errText = await res.text();
-        throw new Error(`HTTP ${res.status}: ${errText.slice(0, 120)}`);
-      }
-
-      if (!res.body) throw new Error("Resposta sem corpo");
-
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
       let accumulated = "";
-      let gotFirst = false;
 
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        const chunk = decoder.decode(value, { stream: true });
-        const lines = chunk.split("\n");
-
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed || trimmed === "data: [DONE]") continue;
-          if (!trimmed.startsWith("data: ")) continue;
-
-          try {
-            const parsed = JSON.parse(trimmed.slice(6));
-            const delta = parsed.choices?.[0]?.delta?.content || "";
-            accumulated += delta;
-
-            if (!gotFirst && accumulated.length > 0) {
-              gotFirst = true;
-              setConnectionStatus("ok");
-              if (navigator.vibrate) navigator.vibrate(8);
-            }
-
+      if (providerId === "openclaw") {
+        accumulated = await sendOpenClaw(
+          allMessages.map(m => ({ role: m.role === "system" ? "user" : m.role, content: m.content } as any)),
+          modelId,
+          (chunk) => {
+            accumulated += chunk;
             setMessages(prev =>
               prev.map(m => m.id === aiId ? { ...m, content: accumulated } : m)
             );
-          } catch {}
-        }
+            if (!loading && accumulated.length > 0) {
+              setConnectionStatus("ok");
+              if (navigator.vibrate) navigator.vibrate(8);
+            }
+          },
+          abortRef.current.signal,
+          activeSkillId || undefined
+        );
+      } else {
+        accumulated = await sendGemini(
+          allMessages,
+          modelId,
+          (chunk) => {
+            accumulated += chunk;
+            setMessages(prev =>
+              prev.map(m => m.id === aiId ? { ...m, content: accumulated } : m)
+            );
+            if (!loading && accumulated.length > 0) {
+              setConnectionStatus("ok");
+              if (navigator.vibrate) navigator.vibrate(8);
+            }
+          },
+          abortRef.current.signal
+        );
       }
 
       if (!accumulated) {
@@ -207,7 +159,7 @@ export default function ChatApp() {
           m.id === aiId
             ? {
                 ...m,
-                content: `Erro de conexao com ${provider.name}.\n\n${errMsg}\n\nVerifique se o servidor esta acessivel em: ${getApiUrl()}`,
+                content: `Erro de conexao com ${provider.name}.\n\n${errMsg}`,
                 error: true,
               }
             : m
@@ -218,7 +170,7 @@ export default function ChatApp() {
       setMessages(prev => prev.map(m => m.id === aiId ? { ...m, streaming: false } : m));
       setTimeout(() => textareaRef.current?.focus(), 50);
     }
-  }, [input, loading, providerId, modelId, apiKeys, agent, agentId, provider, messages, activeSkillId, hokClawSkills, getApiUrl]);
+  }, [input, loading, providerId, modelId, agent, agentId, provider, messages, activeSkillId, openClawSkills, sendOpenClaw, sendGemini]);
 
   const stopGeneration = () => {
     abortRef.current?.abort();
@@ -245,15 +197,14 @@ export default function ChatApp() {
   const applyConfig = (cfg: { providerId: string; modelId: string; keys: Record<string, string>; serverUrls: Record<string, string> }) => {
     setProviderId(cfg.providerId);
     setModelId(cfg.modelId);
-    setApiKeys(prev => ({ ...prev, ...cfg.keys }));
+    setApiKeys(prev => ({ ...prev, ...cfg.keys, gemini: DEFAULT_GEMINI_API_KEY }));
     setServerUrls(prev => ({ ...prev, ...cfg.serverUrls }));
     setConnectionStatus("unknown");
   };
 
   const isEmpty = messages.length === 0 && !loading;
   const modelLabel = provider.models.find(m => m.id === modelId)?.label || modelId;
-  const hasKey = provider.noKey || !!apiKeys[providerId];
-  const showSkills = providerId === "hokclaw" && hokClawSkills.length > 0;
+  const showSkills = providerId === "openclaw" && openClawSkills.length > 0;
 
   return (
     <>
@@ -288,7 +239,7 @@ export default function ChatApp() {
         #hk-skills-bar::-webkit-scrollbar { display: none; }
         .hk-agent-btn { transition: all 0.15s ease; }
         .hk-agent-btn:active { transform: scale(0.96); }
-        .hk-tip-btn:hover { background: #F0F9FF !important; border-color: #BFDBFE !important; }
+        .hk-tip-btn:hover { background: #F5F3FF !important; border-color: #DDD6FE !important; }
         .hk-send-btn:not(:disabled):active { transform: scale(0.94); }
       `}</style>
 
@@ -312,18 +263,21 @@ export default function ChatApp() {
           <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
             <div style={{
               width: 36, height: 36,
-              background: "linear-gradient(135deg, #111827 0%, #1F2937 100%)",
+              background: "linear-gradient(135deg, #7C3AED 0%, #8B5CF6 100%)",
               borderRadius: 10,
               display: "flex", alignItems: "center", justifyContent: "center",
               boxShadow: "0 1px 4px rgba(0,0,0,0.18)",
             }}>
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                <path d="M9.663 17h4.673M12 3v1m6.364 1.636-.707.707M21 12h-1M4 12H3m3.343-5.657-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                <polyline points="12 3 20 7.5 20 16.5 12 21 4 16.5 4 7.5 12 3" />
+                <line x1="12" y1="12" x2="20" y2="7.5" />
+                <line x1="12" y1="12" x2="12" y2="21" />
+                <line x1="12" y1="12" x2="4" y2="7.5" />
               </svg>
             </div>
             <div>
               <div style={{ fontWeight: 800, fontSize: 16, letterSpacing: "-0.4px", lineHeight: 1.1 }}>
-                Hokma <span style={{ color: "#0F62FE" }}>AI</span>
+                Hokma <span style={{ color: "#8B5CF6" }}>AI</span>
               </div>
               <div style={{ fontSize: 10.5, color: "#9CA3AF", fontWeight: 500, letterSpacing: "0.2px" }}>
                 {agent.name} · {modelLabel.replace(" (Free)", "").replace(" Rapido", "")}
@@ -352,9 +306,9 @@ export default function ChatApp() {
             <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
               {provider.name}
             </span>
-            {activeSkillId && providerId === "hokclaw" && (
+            {activeSkillId && providerId === "openclaw" && (
               <span style={{
-                background: "#0F62FE", color: "#fff",
+                background: "#8B5CF6", color: "#fff",
                 fontSize: 9, fontWeight: 800, padding: "1px 5px",
                 borderRadius: 4, letterSpacing: "0.3px", flexShrink: 0,
               }}>
@@ -363,8 +317,8 @@ export default function ChatApp() {
             )}
             <div style={{
               width: 6, height: 6, borderRadius: "50%", flexShrink: 0,
-              background: connectionStatus === "ok" ? "#16A34A" : connectionStatus === "err" ? "#DC2626" : hasKey ? "#D97706" : "#E5E7EB",
-              animation: connectionStatus === "unknown" && hasKey ? "hk-pulse 2s infinite" : "none",
+              background: connectionStatus === "ok" ? "#16A34A" : connectionStatus === "err" ? "#DC2626" : "#D97706",
+              animation: connectionStatus === "unknown" ? "hk-pulse 2s infinite" : "none",
             }} />
           </button>
         </div>
@@ -416,7 +370,7 @@ export default function ChatApp() {
             flexShrink: 0,
           }}>
             <SkillsPanel
-              skills={hokClawSkills}
+              skills={openClawSkills}
               activeSkillId={activeSkillId}
               onSelectSkill={setActiveSkillId}
             />
@@ -442,13 +396,16 @@ export default function ChatApp() {
             }}>
               <div style={{
                 width: 60, height: 60,
-                background: "linear-gradient(135deg, #111827, #1F2937)",
+                background: "linear-gradient(135deg, #7C3AED, #8B5CF6)",
                 borderRadius: 16,
                 display: "flex", alignItems: "center", justifyContent: "center",
                 boxShadow: "0 4px 16px rgba(0,0,0,0.15)",
               }}>
-                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                  <path d="M9.663 17h4.673M12 3v1m6.364 1.636-.707.707M21 12h-1M4 12H3m3.343-5.657-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="12 3 20 7.5 20 16.5 12 21 4 16.5 4 7.5 12 3" />
+                  <line x1="12" y1="12" x2="20" y2="7.5" />
+                  <line x1="12" y1="12" x2="12" y2="21" />
+                  <line x1="12" y1="12" x2="4" y2="7.5" />
                 </svg>
               </div>
 
@@ -456,37 +413,27 @@ export default function ChatApp() {
                 <h2 style={{ fontSize: 20, fontWeight: 800, letterSpacing: "-0.5px", marginBottom: 6 }}>
                   Como posso ajudar?
                 </h2>
-                <p style={{ fontSize: 13.5, color: "#6B7280", lineHeight: 1.5, maxWidth: 280 }}>
-                  {agent.name} via{" "}
+                <p style={{ fontSize: 13.5, color: "#6B7280", lineHeight: 1.5, maxWidth: 320 }}>
+                  {agent.name} com{" "}
                   <span style={{
-                    color: provider.color, fontWeight: 700,
-                    background: provider.color + "12",
+                    color: "#8B5CF6", fontWeight: 700,
+                    background: "#F5F3FF",
                     padding: "1px 7px", borderRadius: 5,
                   }}>
                     {provider.name}
                   </span>
+                  {" "}+ Gemini
                 </p>
                 {activeSkillId && (
                   <div style={{
-                    marginTop: 8, fontSize: 12, color: "#0F62FE",
-                    fontWeight: 600, background: "#EFF6FF",
+                    marginTop: 8, fontSize: 12, color: "#8B5CF6",
+                    fontWeight: 600, background: "#F5F3FF",
                     padding: "4px 12px", borderRadius: 20, display: "inline-block",
                   }}>
-                    Skill ativa: {hokClawSkills.find(s => s.id === activeSkillId)?.name}
+                    Skill: {openClawSkills.find(s => s.id === activeSkillId)?.name}
                   </div>
                 )}
               </div>
-
-              {!hasKey && (
-                <button onClick={() => setShowPanel(true)} style={{
-                  padding: "10px 18px", borderRadius: 10,
-                  border: `1.5px solid ${provider.color}44`,
-                  background: provider.color + "10", color: provider.color,
-                  fontSize: 13, fontWeight: 700, cursor: "pointer", fontFamily: "inherit",
-                }}>
-                  Configurar {provider.name}
-                </button>
-              )}
 
               <div style={{
                 display: "flex", flexDirection: "column", gap: 8,
@@ -533,17 +480,17 @@ export default function ChatApp() {
                   <span>{AGENTS.find(a => a.id === msg.agentId)?.name}</span>
                   {msg.skillUsed && (
                     <span style={{
-                      background: "#EFF6FF", color: "#0F62FE",
+                      background: "#F5F3FF", color: "#8B5CF6",
                       fontSize: 9, fontWeight: 800, padding: "1px 5px",
                       borderRadius: 4, letterSpacing: "0.3px",
                     }}>
-                      {hokClawSkills.find(s => s.id === msg.skillUsed)?.name || msg.skillUsed}
+                      {openClawSkills.find(s => s.id === msg.skillUsed)?.name || msg.skillUsed}
                     </span>
                   )}
                   {msg.streaming && (
                     <span style={{
                       width: 5, height: 5, borderRadius: "50%",
-                      background: "#0F62FE",
+                      background: "#8B5CF6",
                       animation: "hk-pulse 1s infinite",
                       marginLeft: 2,
                     }} />
@@ -607,7 +554,7 @@ export default function ChatApp() {
           <div style={{
             flex: 1,
             background: "#F9FAFB",
-            border: `1.5px solid ${activeSkillId ? "#BFDBFE" : "#E5E7EB"}`,
+            border: `1.5px solid ${activeSkillId ? "#DDD6FE" : "#E5E7EB"}`,
             borderRadius: 14,
             display: "flex", alignItems: "center",
             transition: "border-color 0.15s",
@@ -626,7 +573,7 @@ export default function ChatApp() {
                 isListening
                   ? "Ouvindo..."
                   : activeSkillId
-                  ? `Skill: ${hokClawSkills.find(s => s.id === activeSkillId)?.name || activeSkillId}...`
+                  ? `Skill: ${openClawSkills.find(s => s.id === activeSkillId)?.name || activeSkillId}...`
                   : "Mensagem..."
               }
               rows={1}
@@ -665,7 +612,7 @@ export default function ChatApp() {
               disabled={!input.trim()}
               style={{
                 width: 44, height: 44, borderRadius: "50%", border: "none", flexShrink: 0,
-                background: input.trim() ? (activeSkillId ? "#0F62FE" : "#111827") : "#E5E7EB",
+                background: input.trim() ? (activeSkillId ? "#8B5CF6" : "#111827") : "#E5E7EB",
                 display: "flex", alignItems: "center", justifyContent: "center",
                 cursor: input.trim() ? "pointer" : "not-allowed",
                 transition: "all 0.15s",
@@ -699,12 +646,12 @@ export default function ChatApp() {
                 ? "#16A34A"
                 : connectionStatus === "err"
                 ? "#DC2626"
-                : hasKey ? "#D97706" : "#D1D5DB",
+                : "#D97706",
             }} />
             {provider.name} · {modelLabel.replace(" (Free)", "").replace(" Rapido", "")}
             {activeSkillId && (
-              <span style={{ color: "#0F62FE" }}>
-                · {hokClawSkills.find(s => s.id === activeSkillId)?.name || activeSkillId}
+              <span style={{ color: "#8B5CF6" }}>
+                · {openClawSkills.find(s => s.id === activeSkillId)?.name || activeSkillId}
               </span>
             )}
           </div>

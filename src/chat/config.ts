@@ -1,22 +1,38 @@
 import type { Provider, Agent } from "./types";
 
-export const DEFAULT_HOKCLAW_URL = "http://10.118.44.210:18800";
+export const DEFAULT_OPENCLAW_URL = "http://10.118.44.210:18900";
+export const DEFAULT_GEMINI_API_KEY = "AIzaSyAQvmI4TDNj3zJQs_L_D7t8pDqOX0ll3i4";
 
 export const PROVIDERS: Provider[] = [
   {
-    id: "hokclaw",
-    name: "HokClaw",
-    icon: "H",
-    color: "#0F62FE",
-    freeNote: "Orquestrador Local · Go · Privado",
-    apiUrl: `${DEFAULT_HOKCLAW_URL}/v1/chat/completions`,
+    id: "openclaw",
+    name: "OpenClaw",
+    icon: "◆",
+    color: "#8B5CF6",
+    freeNote: "Orquestrador · Executor de Tarefas · Privado",
+    apiUrl: `${DEFAULT_OPENCLAW_URL}/v1/chat/completions`,
     noKey: true,
     supportsSkills: true,
     supportsModelDiscovery: true,
+    isOrchestrator: true,
     models: [
-      { id: "hokma-coder-v1", label: "Hokmá Coder v1" },
-      { id: "hokma-general-v2", label: "Hokmá Geral v2" },
-      { id: "custom", label: "Modelo personalizado..." },
+      { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash (Cérebro)" },
+      { id: "gemini-1.5-flash", label: "Gemini 1.5 Flash" },
+      { id: "gemini-1.5-flash-8b", label: "Gemini 1.5 Flash 8B" },
+    ],
+  },
+  {
+    id: "gemini",
+    name: "Gemini",
+    icon: "G",
+    color: "#1A73E8",
+    freeNote: "Gratuito · Google AI · Direto",
+    apiUrl: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+    noKey: true,
+    models: [
+      { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
+      { id: "gemini-1.5-flash", label: "Gemini 1.5 Flash" },
+      { id: "gemini-1.5-flash-8b", label: "Gemini 1.5 Flash 8B" },
     ],
   },
   {
@@ -50,21 +66,6 @@ export const PROVIDERS: Provider[] = [
       { id: "mistralai/mistral-7b-instruct:free", label: "Mistral 7B (Free)" },
       { id: "deepseek/deepseek-r1:free", label: "DeepSeek R1 (Free)" },
       { id: "qwen/qwen3-235b-a22b:free", label: "Qwen3 235B (Free)" },
-    ],
-  },
-  {
-    id: "gemini",
-    name: "Gemini",
-    icon: "G",
-    color: "#1A73E8",
-    freeNote: "Gratuito · Google AI",
-    apiUrl: "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
-    keyPlaceholder: "AIza...",
-    keyLink: "https://aistudio.google.com/app/apikey",
-    models: [
-      { id: "gemini-2.0-flash", label: "Gemini 2.0 Flash" },
-      { id: "gemini-1.5-flash", label: "Gemini 1.5 Flash" },
-      { id: "gemini-1.5-flash-8b", label: "Gemini 1.5 Flash 8B" },
     ],
   },
   {
@@ -128,9 +129,15 @@ export const STORE_KEY = "hokma_v2_config";
 export const loadConfig = (): Partial<{ providerId: string; modelId: string; apiKeys: Record<string, string>; serverUrls: Record<string, string> }> => {
   try {
     const raw = localStorage.getItem(STORE_KEY);
-    return raw ? JSON.parse(raw) : {};
+    const cfg = raw ? JSON.parse(raw) : {};
+    return {
+      providerId: cfg.providerId || "openclaw",
+      modelId: cfg.modelId || "gemini-2.0-flash",
+      apiKeys: { ...cfg.apiKeys, gemini: DEFAULT_GEMINI_API_KEY },
+      serverUrls: cfg.serverUrls || {},
+    };
   } catch {
-    return {};
+    return { apiKeys: { gemini: DEFAULT_GEMINI_API_KEY } };
   }
 };
 
